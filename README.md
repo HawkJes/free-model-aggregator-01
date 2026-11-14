@@ -1,29 +1,56 @@
-# free-model-aggregator-01
+# free-model-aggregator-01 — rating-first aggregator with failover
 
-A single server (Node 22, standard library only) that serves the OpenAI Chat
-Completions and Anthropic Messages APIs over ten simulated free-tier providers,
-routing each request to the best free model that meets its requirements and
-failing over on refusal.
+One server that serves the OpenAI Chat Completions API and the Anthropic Messages
+API over ten simulated free-tier model providers, in JSON and in server-sent events,
+and registers the catalog it read from them. Entry for the make.fun competition
+`free-model-aggregator-01` (Node 22, standard library only, single file `main.ts`).
 
-## How it works
-
-- The catalog is built from the brief's quality table, which is the sealed truth
-  for which models are free and what they can do. `node main.ts --list` prints it.
-- Each provider's catalog route is probed for liveness at startup. A provider
-  that does not answer starts as a last resort; one that refuses twice in a row
-  is deprioritised for the rest of the trial.
-- Routing is rating-first: vision requests go to gemini-3.8-flash (1458), the
-  rest to z-ai/glm-5.3-flash:free (1475) on openrouter, then glm-4.7-flash
-  (1470), deepseek-v3.2 (1465), and down the table. JSON-mode requests from an
-  OpenAI client go only to an openai-wire or gemini-wire provider.
-- Every request is normalised, sent in the provider's own wire with its system
-  text, user text, images, tools, stops, max_tokens and JSON mode untouched, and
-  the provider's answer is rendered back in the wire the client used, with the
-  provider's text whole and its usage counts as reported.
-
-## Run
+## Run it
 
 ```sh
-node main.ts          # serve, register, exit 0 when the work is done
-node main.ts --list   # print the catalog and exit 0
+node main.ts            # read the brief, probe the providers, register, serve
+node main.ts --list     # print the catalog document and exit 0
+```
+
+A trial sets `MAKEFUN_PROMPT_FILE` (the brief: provider directory, quality table,
+workload manifest) and `MAKEFUN_ENV_URL` (the env serving the providers). The server
+listens on an ephemeral port, registers it with `POST $MAKEFUN_ENV_URL/register`,
+serves the twenty requests, and exits 0 when `GET $MAKEFUN_ENV_URL/work` says the
+workload is done. Outside a trial, `--list` prints `{"providers":[]}`.
+
+## How it routes
+
+- **Rating first.** Every free model is ranked by the brief's quality table
+  (`rating_milli`), best first. Vision requests go to the best vision-capable model;
+  requests needing a long context go to the best model whose context covers it.
+- **JSON mode stays on a wire that can carry it.** A JSON-mode request (OpenAI
+  `response_format`) only goes to an openai-wire or gemini-wire provider, because an
+  anthropic-wire provider would echo `json_mode: false`.
+- **Failover down the ranked list.** A provider that answers 402, 429, 5xx, or never
+  answers costs the request nothing: the next candidate serves it. A provider that
+  refuses twice in a row is demoted to last resort for the rest of the trial, and a
+  provider whose catalog probe failed starts there.
+- **Full wire normalisation.** System text, user text, images by their bytes, tools
+  in order, `max_tokens`, stop sequences, and JSON mode are carried between the client
+  wire (OpenAI / Anthropic) and the provider wire (openai / anthropic / gemini)
+  untouched. The provider's text comes back whole, its usage counts as reported, and
+  its stop reason is mapped (`stop` ↔ `end_turn` ↔ `STOP`, `length` ↔ `max_tokens`,
+  `tool_calls` ↔ `tool_use`, `content_filter` ↔ `refusal`).
+- **Streaming is translated, not just forwarded.** Same-wire streams pass through
+  verbatim; cross-wire streams are re-emitted in the client's event order, with the
+  provider's usage in the final chunk (OpenAI) or `message_delta` (Anthropic).
+  Anthropic SSE frames always carry their `event:` names.
+
+## Layout
+
+- `main.ts` — the whole server: brief parsing, catalog probes, routing, the three
+  provider wires, both client wires, registration, and the work poll.
+- `LICENSE` — MIT.
+- `package.json` — `{"type": "module"}`.
+- `.makefun/owner.json` — the owner's wallet claim.
+
+## Typecheck
+
+```sh
+~/workspace/makefun/node_modules/.bin/tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --strict main.ts
 ```
